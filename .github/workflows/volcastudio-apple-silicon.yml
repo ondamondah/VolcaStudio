@@ -1,0 +1,184 @@
+name: Build VolcaStudio for Apple Silicon
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          architecture: arm64
+      - name: Fetch verified beta source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          python -c 'import platform; assert platform.machine() == "arm64"'
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/ondamondah/VolcaStudio/releases/download/v1.4.11-beta.1/VolcaStudio-1.4.11-macOS-beta.zip -o beta.zip
+          printf '%s  %s\n' '9b0a85fd0136cfb0b43ea99435f25c2baf5b90b5758ccbd98b44b0e40d5c6e99' beta.zip | shasum -a 256 -c
+          unzip -q beta.zip
+          cd VolcaStudio-1.4.11
+          patch -p1 --batch <<'VOLCASTUDIO_PATCH'
+          --- a/app/main.py
+          +++ b/app/main.py
+          @@ -1,10 +1,16 @@
+           import sys
+           
+          -from PySide6.QtWidgets import QApplication
+          -from app.ui.main_window import MainWindow
+          +from app.core.device_worker import run_device_worker
+           
+           
+           def main() -> int:
+          +    if len(sys.argv) >= 3 and sys.argv[1] == "--device-worker":
+          +        run_device_worker(*sys.argv[2:])
+          +        return 0
+          +
+          +    from PySide6.QtWidgets import QApplication
+          +    from app.ui.main_window import MainWindow
+          +
+               app = QApplication(sys.argv)
+               app.setApplicationName("VolcaStudio")
+               app.setOrganizationName("VolcaStudio")
+          --- a/app/ui/main_window.py
+          +++ b/app/ui/main_window.py
+          @@ -3,6 +3,7 @@
+           from app.ui.translations import retranslate, set_language, tr, translated, translated_action
+           
+           from app import __version__
+          +from app.core.device_worker import device_worker_argv
+           from app.device.volca_sample2 import EmptySampleSlotError, InvalidSlotReplyError
+           
+           from concurrent.futures import ThreadPoolExecutor
+          @@ -11,7 +12,6 @@
+           import logging
+           import shutil
+           import subprocess
+          -import sys
+           import tempfile
+           from pathlib import Path
+           from datetime import datetime
+          @@ -1049,7 +1049,7 @@
+               def _run_device_command(command, *args, timeout=45):
+                   try:
+                       result = subprocess.run(
+          -                [sys.executable, "-B", "-c", command, *(str(arg) for arg in args)],
+          +                device_worker_argv(command, *(str(arg) for arg in args)),
+                           cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=timeout,
+                       )
+                   except subprocess.TimeoutExpired as exc:
+          @@ -1089,7 +1089,7 @@
+                       target = Path(folder) / "sample.wav"
+                       try:
+                           result = subprocess.run(
+          -                    [sys.executable, "-B", "-c", command, str(slot), str(target)],
+          +                    device_worker_argv(command, str(slot), str(target)),
+                               cwd=Path(__file__).resolve().parents[2],
+                               capture_output=True, text=True, timeout=30,
+                           )
+          --- a/app/ui/pages/slots.py
+          +++ b/app/ui/pages/slots.py
+          @@ -5,7 +5,6 @@
+           import os
+           import shutil
+           import subprocess
+          -import sys
+           import tempfile
+           
+           from PySide6.QtCore import QItemSelectionModel, QSignalBlocker, Qt, QTimer, QSize, Signal
+          @@ -16,6 +15,7 @@
+               QAbstractItemView, QMessageBox, QSplitter, QLineEdit, QListWidgetItem, QFileDialog, QProgressBar, QComboBox, QInputDialog, QMenu,
+           )
+           
+          +from app.core.device_worker import device_worker_argv
+           from app.device.volca_sample2 import MAX_TRANSFER_SECONDS, estimated_sample_memory
+           from app.ui.device_tasks import VOLCA_NO_REPLY, is_identify_timeout, wait_for_device
+           from app.ui.preferences import startup_options
+          @@ -1266,7 +1266,7 @@
+               def _run_slot_command(command, *args, timeout):
+                   try:
+                       result = subprocess.run(
+          -                [sys.executable, "-B", "-c", command, *args],
+          +                device_worker_argv(command, *args),
+                           cwd=Path(__file__).resolve().parents[3], capture_output=True, text=True, timeout=timeout,
+                       )
+                   except subprocess.TimeoutExpired as exc:
+          --- /dev/null
+          +++ b/app/core/device_worker.py
+          @@ -0,0 +1,16 @@
+          +"""Reuse the application executable for isolated device work in a frozen build."""
+          +
+          +import sys
+          +
+          +
+          +def device_worker_argv(command, *args):
+          +    if getattr(sys, "frozen", False):
+          +        return [sys.executable, "--device-worker", command, *args]
+          +    return [sys.executable, "-B", "-c", command, *args]
+          +
+          +
+          +def run_device_worker(command, *args):
+          +    # Preserve the same argument layout as Python's -c in source launches.
+          +    sys.argv = ["-c", *args]
+          +    namespace = {"__name__": "__main__"}
+          +    exec(compile(command, "<device worker>", "exec"), namespace)
+          --- /dev/null
+          +++ b/build-macos.sh
+          @@ -0,0 +1,20 @@
+          +#!/bin/zsh
+          +set -eu
+          +cd -- "${0:A:h}"
+          +
+          +python_executable=${VOLCASTUDIO_BUILD_PYTHON:-.venv/bin/python}
+          +architecture=${VOLCASTUDIO_BUILD_ARCH:-$(uname -m)}
+          +version=$("$python_executable" -c 'from app import __version__; print(__version__)')
+          +args=()
+          +if [[ -n ${VOLCASTUDIO_CODESIGN_IDENTITY:-} ]]; then
+          +    args+=(--codesign-identity "$VOLCASTUDIO_CODESIGN_IDENTITY")
+          +fi
+          +
+          +"$python_executable" -m PyInstaller --noconfirm --clean --onedir --windowed \
+          +    --name VolcaStudio --osx-bundle-identifier com.ondamondah.volcastudio \
+          +    --target-architecture "$architecture" \
+          +    --hidden-import mido.backends.rtmidi \
+          +    --hidden-import app.device.sample_restore \
+          +    --add-data 'app/device/init_pattern.vlcsplpattb:app/device' \
+          +    "${args[@]}" app/main.py
+          +/usr/bin/ditto -c -k --keepParent dist/VolcaStudio.app "dist/VolcaStudio-${version}-macOS-${architecture}-app.zip"
+          VOLCASTUDIO_PATCH
+      - name: Build and verify the self-contained app
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd VolcaStudio-1.4.11
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt pyinstaller==6.22.3
+          zsh build-macos.sh
+          zip=dist/VolcaStudio-1.4.11-macOS-arm64-app.zip
+          ditto -x -k "$zip" verify
+          bundle=verify/VolcaStudio.app
+          codesign --verify --deep --strict "$bundle"
+          binary="$bundle/Contents/MacOS/VolcaStudio"
+          test "$(lipo -archs "$binary")" = arm64
+          result=$(env PATH=/usr/bin:/bin "$binary" --device-worker 'from app import __version__; from app.device.sample_restore import load_init_pattern; import simpleaudio, soundfile; from mido.backends import rtmidi; assert len(load_init_pattern()) == 7936; print(__version__)')
+          test "$result" = 1.4.11
+          (
+            cd dist
+            shasum -a 256 VolcaStudio-1.4.11-macOS-arm64-app.zip > SHA256SUMS.txt
+          )
+      - name: Upload test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: VolcaStudio-1.4.11-Apple-Silicon
+          path: |
+            VolcaStudio-1.4.11/dist/VolcaStudio-1.4.11-macOS-arm64-app.zip
+            VolcaStudio-1.4.11/dist/SHA256SUMS.txt
+          if-no-files-found: error
