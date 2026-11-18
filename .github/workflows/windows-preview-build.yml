@@ -1,0 +1,44 @@
+name: Windows Preview build
+on:
+  push:
+    branches: [windows-preview-ci]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt pyinstaller
+      - name: Build Windows executable
+        run: >
+          python -m PyInstaller --noconfirm --onedir --windowed
+          --name VolcaStudio --collect-data imageio_ffmpeg app/main.py
+      - name: Launch packaged application
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $exe = Join-Path $PWD 'dist/VolcaStudio/VolcaStudio.exe'
+          $app = Start-Process -FilePath $exe -PassThru
+          try {
+            Start-Sleep -Seconds 10
+            if ($app.HasExited) { throw "VolcaStudio exited during startup: $($app.ExitCode)" }
+            if (-not $app.Responding) { throw "VolcaStudio stopped responding" }
+          } finally {
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id }
+          }
+      - name: Prepare tester ZIP
+        shell: pwsh
+        run: |
+          Copy-Item tests/windows-preview/TEST-WINDOWS.txt dist/VolcaStudio/
+          python tests/windows-preview/make_sample.py dist/VolcaStudio/Test-Loop.wav
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive -Path dist/VolcaStudio -DestinationPath VolcaStudio-Windows-x64-Preview.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VolcaStudio-Windows-x64-Preview
+          path: VolcaStudio-Windows-x64-Preview.zip
+          if-no-files-found: error

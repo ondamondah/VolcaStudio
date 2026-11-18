@@ -1,0 +1,8 @@
+VolcaStudio Windows Preview — test without a Volca
+
+1. Extract the entire ZIP. Open the extracted VolcaStudio folder and run VolcaStudio.exe. Keep the _internal folder next to it. Python is not required.
+2. Open Samples, click Import audio, and select Test-Loop.wav from the extracted folder. Click the play button next to the sample. You should hear eight short beats.
+3. Double-click the sample name to open the editor. Select Slice, open Auto-slice, and choose 4 equal slices. Press 1 and 2 to hear two different pads. Click Add to Library (4) and check that four new samples appear.
+4. Send back your Windows version and whether startup, sound, and slicing worked. If anything fails, send the step number and a screenshot or the exact message.
+
+No Volca is needed for this test. The preview is unsigned. If Windows blocks it, send a screenshot of the message.
