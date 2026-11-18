@@ -1,4 +1,5 @@
 import struct
+import sys
 import unittest
 from queue import SimpleQueue
 from unittest.mock import MagicMock, patch
@@ -7,6 +8,17 @@ from app.device import volca_sample2 as volca
 
 
 class WindowsMidiTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Requires the native Windows WinMM library")
+    def test_native_driver_without_hardware(self):
+        # The hosted Windows runner has no Volca attached.
+        source = volca.WinMMInput()
+        with self.assertRaisesRegex(RuntimeError, "No Volca Sample 2 MIDI input found"):
+            with source:
+                self.fail("Unexpected Volca input on the Windows runner")
+        with self.assertRaisesRegex(RuntimeError, "Connect one Volca Sample 2 via USB"):
+            with volca._device_session():
+                self.fail("Unexpected Volca connection on the Windows runner")
+
     def test_identify_headers_and_audio_through_one_input(self):
         packets = SimpleQueue()
         output = MagicMock()

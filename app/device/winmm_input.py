@@ -61,6 +61,8 @@ class WinMMInput:
             if not self.driver.midiInGetDevCapsW(index, ct.byref(caps), ct.sizeof(caps)):
                 if "volca sample" in caps.name.casefold():
                     candidates.append(index)
+        if not candidates:
+            raise RuntimeError("No Volca Sample 2 MIDI input found. Connect it via USB and turn it on.")
         if len(candidates) != 1:
             raise RuntimeError("Exactly one Volca WinMM input is required.")
         self._call("midiInOpen", ct.byref(self.handle), candidates[0], self.callback, 0, 0x30000)
