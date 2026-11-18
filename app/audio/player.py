@@ -1,9 +1,44 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import sys
+from time import monotonic
 import wave
-import simpleaudio as sa
+
+if sys.platform == "win32":
+    import winsound
+else:
+    import simpleaudio as sa
 
 from app.audio.converter import prepare_playback_wav
+
+
+class WindowsPlayback:
+    def __init__(self, frames, channels, sample_width, sample_rate):
+        self.folder = TemporaryDirectory(prefix="VolcaStudio-audio-")
+        self.deadline = 0
+        try:
+            path = Path(self.folder.name) / "preview.wav"
+            with wave.open(str(path), "wb") as output:
+                output.setparams((channels, sample_width, sample_rate, 0, "NONE", "not compressed"))
+                output.writeframes(frames)
+            winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+            self.deadline = monotonic() + len(frames) / (channels * sample_width * sample_rate)
+        except Exception:
+            self.folder.cleanup()
+            raise
+
+    def stop(self):
+        winsound.PlaySound(None, 0)
+        self.folder.cleanup()
+
+    def is_playing(self):
+        return monotonic() < self.deadline
+
+
+def play_buffer(frames, channels, sample_width, sample_rate):
+    if sys.platform == "win32":
+        return WindowsPlayback(frames, channels, sample_width, sample_rate)
+    return sa.play_buffer(frames, channels, sample_width, sample_rate)
 
 
 class AudioPlayer:
@@ -26,7 +61,7 @@ class AudioPlayer:
         self.stop()
         with wave.open(str(path), "rb") as audio:
             audio.setpos(start)
-            self.playback = sa.play_buffer(
+            self.playback = play_buffer(
                 audio.readframes(end - start), audio.getnchannels(),
                 audio.getsampwidth(), audio.getframerate(),
             )
@@ -38,7 +73,7 @@ class AudioPlayer:
             sample_rate = audio.getframerate()
             frames = audio.readframes(audio.getnframes())
 
-        self.playback = sa.play_buffer(
+        self.playback = play_buffer(
             frames,
             channels,
             sample_width,

@@ -2,6 +2,7 @@
 import os
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import wave
@@ -12,6 +13,7 @@ from queue import Empty
 import mido
 import rtmidi
 
+from app.audio.converter import convert_pcm_wav
 from app.device.coremidi_input import volca_packets
 
 _HEADER = bytes.fromhex("42 30 00 01 2d")
@@ -45,13 +47,10 @@ def _unpack(packed):
 def _prepare(source):
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory) / "sample.wav"
-        result = subprocess.run(
-            ["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16@31250", "-c", "1",
-             str(Path(source).resolve()), str(target)],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode:
-            raise ValueError("macOS could not convert this audio: " + result.stderr.strip())
+        try:
+            convert_pcm_wav(Path(source).resolve(), target, rate=_RATE, channels=1)
+        except subprocess.CalledProcessError as exc:
+            raise ValueError("Could not convert this audio: " + exc.stderr.decode(errors="replace").strip()) from exc
         with wave.open(str(target), "rb") as wav:
             frames = wav.getnframes()
             if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) != (1, 2, _RATE):
@@ -399,6 +398,8 @@ def _read_audio(packets, send, address, expected):
 
 
 def _read_sample_pcm(slot, frames, send):
+    if sys.platform != "darwin":
+        raise RuntimeError("USB sample audio readback is not available on this platform yet.")
     address = bytes((slot & 127, slot >> 7))
     if frames > 8 * 1024 * 1024 // 2:
         raise ValueError("Volca reported an invalid sample length.")
@@ -472,6 +473,8 @@ def sample_memory_cost(pcm_bytes):
 
 
 def _write_sample(slot, header, pcm, exchange, read_header, send):
+    if sys.platform != "darwin":
+        raise RuntimeError("USB sample audio readback is not available on this platform yet.")
     _, frames, _, _ = header
     def write(opcode, payload):
         reply = exchange(_HEADER + bytes((opcode,)) + address + _pack(payload),

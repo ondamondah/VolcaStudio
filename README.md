@@ -39,3 +39,7 @@ python3.11 -m venv .venv
 
 В **Samples → Actions** команда **Send Library to Volca…** подбирает свободные слоты для всей библиотеки и открывает предпросмотр. При остановке **Review remaining…** перечитывает оставшиеся слоты и открывает предпросмотр с прежними номерами. **Optimize Library…** убирает почти бесшумные края, сохраняя оригиналы в истории правок.
 
+
+## Windows development preview
+
+On Windows, install Python 3.11 and open `VolcaStudio.cmd` to install dependencies and launch the app. The Windows smoke workflow checks dependency setup, conversion to Volca PCM and slice export. USB audio readback and verified sample transfers require a Windows MIDI implementation and are currently unavailable on Windows.
