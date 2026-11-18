@@ -30,6 +30,8 @@ jobs:
           } finally {
             if (-not $app.HasExited) { Stop-Process -Id $app.Id }
           }
+      - name: Check packaged device worker output
+        run: python tests/windows-preview/check_worker.py dist/VolcaStudio/VolcaStudio.exe
       - name: Prepare tester ZIP
         shell: pwsh
         run: |
