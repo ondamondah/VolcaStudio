@@ -42,4 +42,4 @@ python3.11 -m venv .venv
 
 ## Windows development preview
 
-On Windows, install Python 3.11 and open `VolcaStudio.cmd` to install dependencies and launch the app. The Windows smoke workflow checks dependency setup, conversion to Volca PCM and slice export. USB audio readback and verified sample transfers require a Windows MIDI implementation and are currently unavailable on Windows.
+On Windows, install Python 3.11 and open `VolcaStudio.cmd` to install dependencies and launch the app. The Windows smoke workflow checks dependency setup, conversion to Volca PCM and slice export. USB audio readback and verified sample transfers use WinMM on Windows. These paths have been tested with simulated MIDI replies and still need verification on a Windows PC with a Volca Sample 2.

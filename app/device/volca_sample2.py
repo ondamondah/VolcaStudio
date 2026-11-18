@@ -6,7 +6,7 @@ import sys
 import tempfile
 import time
 import wave
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from queue import Empty
 
@@ -15,6 +15,7 @@ import rtmidi
 
 from app.audio.converter import convert_pcm_wav
 from app.device.coremidi_input import volca_packets
+from app.device.winmm_input import WinMMInput
 
 _HEADER = bytes.fromhex("42 30 00 01 2d")
 _IDENTITY = bytes.fromhex("42 2d 01 08 00")
@@ -88,66 +89,113 @@ def _identify_device(exchange):
 
 
 @contextmanager
-def _device_session():
-    input_name, output_name = _ports()
+def _midi_input(input_name):
+    if sys.platform == "win32":
+        with WinMMInput() as packets:
+            yield packets, True
+        return
     midi_in = rtmidi.MidiIn()
     midi_in.ignore_types(False, True, True)
     midi_in.open_port(midi_in.get_ports().index(input_name))
     try:
-        with mido.open_output(output_name) as output:
-            def send(data):
-                output.send(data if isinstance(data, mido.Message) else mido.Message("sysex", data=data))
+        yield midi_in, False
+    finally:
+        midi_in.close_port()
 
-            def exchange(data, matches, stage, *, timeout=8):
+
+class _MidiSender:
+    def __init__(self, output, packets):
+        self.output = output
+        self.packets = packets
+
+    def __call__(self, data):
+        message = data if isinstance(data, mido.Message) else mido.Message("sysex", data=data)
+        self.output.send(message)
+
+
+def _read_windows_reply(packets, deadline):
+    message = bytearray()
+    while time.monotonic() < deadline:
+        try:
+            chunk = packets.get(timeout=max(0, deadline - time.monotonic()))
+        except Empty:
+            break
+        for byte in chunk:
+            if byte == 0xf0:
+                message[:] = b"\xf0"
+            elif message and byte == 0xf7:
+                message.append(byte)
+                return message
+            elif message and byte < 0xf8:
+                message.append(byte)
+    return None
+
+
+@contextmanager
+def _device_session():
+    input_name, output_name = _ports()
+    with _midi_input(input_name) as (midi_in, raw), mido.open_output(output_name) as output:
+        send = _MidiSender(output, midi_in if raw else None)
+
+        def exchange(data, matches, stage, *, timeout=8):
+            if raw:
+                while True:
+                    try:
+                        midi_in.get_nowait()
+                    except Empty:
+                        break
+            else:
                 while midi_in.get_message() is not None:
                     pass
-                send(data)
-                deadline = time.monotonic() + timeout
-                last_reply = None
-                while time.monotonic() < deadline:
+            send(data)
+            deadline = time.monotonic() + timeout
+            last_reply = None
+            while time.monotonic() < deadline:
+                if raw:
+                    message = _read_windows_reply(midi_in, deadline)
+                    if message is None:
+                        break
+                else:
                     event = midi_in.get_message()
                     if event is None:
                         time.sleep(0.002)
                         continue
                     message, _ = event
-                    if len(message) < 2 or message[0] != 0xf0 or message[-1] != 0xf7:
-                        continue
-                    reply = bytes(value for value in message[1:-1] if value < 0xf8)
-                    if any(value >= 0x80 for value in reply):
-                        continue
-                    if matches(reply):
-                        return reply
-                    last_reply = reply
-                detail = f" Unexpected reply: {last_reply[:10].hex(' ')}." if last_reply else ""
-                raise TimeoutError(f"{stage}: no matching reply from Volca.{detail}")
+                if len(message) < 2 or message[0] != 0xf0 or message[-1] != 0xf7:
+                    continue
+                reply = bytes(value for value in message[1:-1] if value < 0xf8)
+                if any(value >= 0x80 for value in reply):
+                    continue
+                if matches(reply):
+                    return reply
+                last_reply = reply
+            detail = f" Unexpected reply: {last_reply[:10].hex(' ')}." if last_reply else ""
+            raise TimeoutError(f"{stage}: no matching reply from Volca.{detail}")
 
-            _identify_device(exchange)
+        _identify_device(exchange)
 
-            def read_header(number):
-                address = bytes((number & 127, number >> 7))
-                prefix = _HEADER + b"\x4e" + address
-                request = _HEADER + b"\x1e" + address
-                for attempt in range(2):
-                    try:
-                        reply = exchange(request, lambda data: data.startswith(prefix),
-                                         f"Read slot {number:03d}")
-                    except TimeoutError:
-                        if attempt == 1:
-                            raise
-                    else:
-                        if len(reply) == 45:
-                            break
-                        if attempt == 1:
-                            raise InvalidSlotReplyError(
-                                f"Read slot {number:03d}: expected 45 reply bytes, got {len(reply)}."
-                            )
-                    time.sleep(0.05)
-                return struct.unpack("<24sIHH", _unpack(reply[8:]))
+        def read_header(number):
+            address = bytes((number & 127, number >> 7))
+            prefix = _HEADER + b"\x4e" + address
+            request = _HEADER + b"\x1e" + address
+            for attempt in range(2):
+                try:
+                    reply = exchange(request, lambda data: data.startswith(prefix),
+                                     f"Read slot {number:03d}")
+                except TimeoutError:
+                    if attempt == 1:
+                        raise
+                else:
+                    if len(reply) == 45:
+                        break
+                    if attempt == 1:
+                        raise InvalidSlotReplyError(
+                            f"Read slot {number:03d}: expected 45 reply bytes, got {len(reply)}."
+                        )
+                time.sleep(0.05)
+            return struct.unpack("<24sIHH", _unpack(reply[8:]))
 
-            yield exchange, read_header, send
-
-    finally:
-        midi_in.close_port()
+        yield exchange, read_header, send
 
 
 def list_slots():
@@ -398,7 +446,7 @@ def _read_audio(packets, send, address, expected):
 
 
 def _read_sample_pcm(slot, frames, send):
-    if sys.platform != "darwin":
+    if sys.platform not in ("darwin", "win32"):
         raise RuntimeError("USB sample audio readback is not available on this platform yet.")
     address = bytes((slot & 127, slot >> 7))
     if frames > 8 * 1024 * 1024 // 2:
@@ -406,7 +454,8 @@ def _read_sample_pcm(slot, frames, send):
     size = frames * 2
     expected = 8 + size + (size + 6) // 7
     busy = _HEADER + b"\x24"
-    with volca_packets() as packets:
+    raw_packets = getattr(send, "packets", None)
+    with (nullcontext(raw_packets) if raw_packets is not None else volca_packets()) as packets:
         time.sleep(0.05)
         for attempt in range(3):
             try:
@@ -473,7 +522,7 @@ def sample_memory_cost(pcm_bytes):
 
 
 def _write_sample(slot, header, pcm, exchange, read_header, send):
-    if sys.platform != "darwin":
+    if sys.platform not in ("darwin", "win32"):
         raise RuntimeError("USB sample audio readback is not available on this platform yet.")
     _, frames, _, _ = header
     def write(opcode, payload):
